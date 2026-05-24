@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sweepExpiredReservations } from "@/lib/reservations";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
-  // Verify cron secret to prevent unauthorized calls
   const authHeader = request.headers.get("Authorization");
   const cronSecret = process.env.CRON_SECRET;
 
@@ -16,6 +14,7 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now();
 
   try {
+    const { sweepExpiredReservations } = await import("@/lib/reservations");
     const released = await sweepExpiredReservations();
     const duration = Date.now() - startTime;
 
@@ -30,10 +29,7 @@ export async function GET(request: NextRequest) {
   } catch (err) {
     console.error("[CRON] Sweep failed:", err);
     return NextResponse.json(
-      {
-        success: false,
-        error: err instanceof Error ? err.message : "Unknown error",
-      },
+      { success: false, error: err instanceof Error ? err.message : "Unknown error" },
       { status: 500 }
     );
   }
