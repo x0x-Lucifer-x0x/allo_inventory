@@ -1,65 +1,41 @@
-import { NextRequest } from "next/server";
-import { apiSuccess, handleApiError } from "@/lib/api";
+import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
+  const authHeader = request.headers.get("Authorization");
+  const cronSecret = process.env.CRON_SECRET;
+
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const startTime = Date.now();
+
   try {
     const { prisma } = await import("@/lib/prisma");
+    const { sweepExpiredReservations } = await import("@/lib/reservations");
 
-    const [
-      totalReservations, pendingReservations, confirmedReservations,
-      releasedReservations, expiredReservations, totalProducts, totalWarehouses, stockSummary,
-    ] = await Promise.all([
-      prisma.reservation.count(),
-      prisma.reservation.count({ where: { status: "PENDING" } }),
-      prisma.reservation.count({ where: { status: "CONFIRMED" } }),
-      prisma.reservation.count({ where: { status: "RELEASED" } }),
-      prisma.reservation.count({ where: { status: "EXPIRED" } }),
-      prisma.product.count(),
-      prisma.warehouse.count(),
-      prisma.stock.aggregate({ _sum: { total: true, reserved: true } }),
-    ]);
+    // Warm up prisma before sweep
+    await prisma.$queryRaw`SELECT 1`;
 
-    const totalStock = stockSummary._sum.total ?? 0;
-    const totalReserved = stockSummary._sum.reserved ?? 0;
+    const released = await sweepExpiredReservations();
+    const duration = Date.now() - startTime;
 
-    const revenueData = await prisma.reservation.findMany({
-      where: { status: "CONFIRMED" },
-      include: { product: { select: { price: true } } },
-    });
+    console.log(`[CRON] Swept ${released} expired reservations in ${duration}ms`);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const totalRevenue = (revenueData as any[]).reduce(
-      (sum: number, r: { quantity: number; product: { price: number } }) =>
-        sum + r.product.price * r.quantity,
-      0
-    );
-
-    return apiSuccess({
-      reservations: {
-        total: totalReservations,
-        pending: pendingReservations,
-        confirmed: confirmedReservations,
-        released: releasedReservations,
-        expired: expiredReservations,
-        conversionRate: totalReservations > 0
-          ? Math.round((confirmedReservations / totalReservations) * 100)
-          : 0,
-      },
-      inventory: {
-        totalProducts, totalWarehouses, totalStock, totalReserved,
-        totalAvailable: totalStock - totalReserved,
-        utilizationRate: totalStock > 0
-          ? Math.round((totalReserved / totalStock) * 100)
-          : 0,
-      },
-      revenue: {
-        total: totalRevenue,
-        formatted: `₹${(totalRevenue / 100).toLocaleString("en-IN")}`,
-      },
+    return NextResponse.json({
+      success: true,
+      released,
+      durationMs: duration,
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    return handleApiError(err);
+    console.error("[CRON] Sweep failed:", err);
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : "Unknown error" },
+      { status: 500 }
+    );
   }
 }
